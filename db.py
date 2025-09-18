@@ -52,25 +52,33 @@ class MongoCaseRepository:
 
         collection = self.collection_handle
 
+        text_projection = {
+            "score": {"$meta": "textScore"},
+            "case_title": 1,
+            "court": 1,
+            "judgment_date": 1,
+            "citation": 1,
+            "bench": 1,
+            "issues": 1,
+            "reasoning": 1,
+            "outcome": 1,
+            "search_metadata": 1,
+        }
+
         try:
             cursor = collection.find(
                 {"$text": {"$search": query}},
-                {
-                    "score": {"$meta": "textScore"},
-                    "case_title": 1,
-                    "court": 1,
-                    "judgment_date": 1,
-                    "citation": 1,
-                    "bench": 1,
-                    "issues": 1,
-                    "reasoning": 1,
-                    "outcome": 1,
-                    "search_metadata": 1,
-                },
+                text_projection,
                 sort=[("score", {"$meta": "textScore"})],
                 limit=self.limit,
             )
+            documents = [
+                self._normalise_document(document)
+                for document in cursor
+            ]
         except errors.OperationFailure:
+            fallback_projection = dict(text_projection)
+            fallback_projection.pop("score", None)
             cursor = collection.find(
                 {
                     "$or": [
@@ -79,14 +87,15 @@ class MongoCaseRepository:
                         {"search_metadata.summary": {"$regex": query, "$options": "i"}},
                     ]
                 },
+                fallback_projection,
                 limit=self.limit,
             )
+            documents = [
+                self._normalise_document(document)
+                for document in cursor
+            ]
         except errors.PyMongoError as exc:  # pragma: no cover - depends on runtime
             raise RepositoryError("Failed to run search query against MongoDB.") from exc
-
-        documents: List[Dict[str, Any]] = []
-        for document in cursor:
-            documents.append(self._normalise_document(document))
 
         return self._semantic_rerank(query, documents)
 
