@@ -6,7 +6,8 @@ A Streamlit application that lets you search Supreme Court of India decisions st
 
 - 💬 **Chat-style search** – ask questions in natural language using the Streamlit chat input.
 - 🔎 **MongoDB powered** – retrieves matching cases via MongoDB text search (with a regex fallback when no text index exists).
-- 🧠 **Rich case cards** – displays summaries, issues, reasoning, and outcomes in expandable sections.
+- 🧠 **Semantic reranking** – reorders Mongo results by similarity using sentence-transformer embeddings.
+- 📚 **Rich case cards** – displays summaries, issues, reasoning, and outcomes in expandable sections.
 - 🆘 **Offline sample data** – shows curated sample results when MongoDB is unreachable so you can preview the UI immediately.
 
 ## Getting started

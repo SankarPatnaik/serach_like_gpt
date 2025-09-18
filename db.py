@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from pymongo import MongoClient, errors
+from sentence_transformers import SentenceTransformer
 
 
 class RepositoryError(RuntimeError):
@@ -86,7 +88,7 @@ class MongoCaseRepository:
         for document in cursor:
             documents.append(self._normalise_document(document))
 
-        return documents
+        return self._semantic_rerank(query, documents)
 
     def _normalise_document(self, document: Dict[str, Any]) -> Dict[str, Any]:
         if document is None:
@@ -98,8 +100,74 @@ class MongoCaseRepository:
         normalised.pop("score", None)
         return normalised
 
+    def _semantic_rerank(
+        self, query: str, documents: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        if len(documents) <= 1:
+            return documents
+
+        try:
+            model = _get_embedding_model()
+            doc_texts = [self._document_to_text(document) for document in documents]
+            query_vector = model.encode(
+                query, convert_to_numpy=True, normalize_embeddings=True
+            )
+            document_vectors = model.encode(
+                doc_texts, convert_to_numpy=True, normalize_embeddings=True
+            )
+        except Exception:  # pragma: no cover - fallback when embeddings fail
+            return documents
+
+        scores = document_vectors @ query_vector
+        ranked = sorted(
+            zip(scores.tolist(), documents),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        return [document for _, document in ranked]
+
+    def _document_to_text(self, document: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for key in ("case_title", "court", "citation"):
+            value = document.get(key)
+            if value:
+                parts.append(str(value))
+
+        bench = document.get("bench")
+        if isinstance(bench, list):
+            parts.extend(str(member) for member in bench if member)
+
+        issues = document.get("issues")
+        if isinstance(issues, list):
+            parts.extend(str(issue) for issue in issues if issue)
+
+        summary = document.get("search_metadata", {}).get("summary")
+        if summary:
+            parts.append(str(summary))
+
+        reasoning = document.get("reasoning")
+        if isinstance(reasoning, dict):
+            parts.extend(str(text) for text in reasoning.values() if text)
+
+        outcome = document.get("outcome")
+        if isinstance(outcome, dict):
+            decision = outcome.get("decision")
+            if decision:
+                parts.append(str(decision))
+            directions = outcome.get("directions")
+            if isinstance(directions, list):
+                parts.extend(str(direction) for direction in directions if direction)
+
+        return " ".join(parts)
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
             self._client = None
             self._collection = None
+
+
+@lru_cache(maxsize=1)
+def _get_embedding_model() -> SentenceTransformer:
+    """Return a cached embedding model for semantic similarity."""
+    return SentenceTransformer("all-MiniLM-L6-v2")
