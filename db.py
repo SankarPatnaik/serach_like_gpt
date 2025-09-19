@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from pymongo import MongoClient, errors
 from sentence_transformers import SentenceTransformer
@@ -65,6 +65,9 @@ class MongoCaseRepository:
             "search_metadata": 1,
         }
 
+        documents: List[Dict[str, Any]] = []
+        run_fallback = False
+
         try:
             cursor = collection.find(
                 {"$text": {"$search": query}},
@@ -77,27 +80,66 @@ class MongoCaseRepository:
                 for document in cursor
             ]
         except errors.OperationFailure:
-            fallback_projection = dict(text_projection)
-            fallback_projection.pop("score", None)
-            cursor = collection.find(
-                {
-                    "$or": [
-                        {"case_title": {"$regex": query, "$options": "i"}},
-                        {"issues": {"$regex": query, "$options": "i"}},
-                        {"search_metadata.summary": {"$regex": query, "$options": "i"}},
-                    ]
-                },
-                fallback_projection,
-                limit=self.limit,
-            )
-            documents = [
-                self._normalise_document(document)
-                for document in cursor
-            ]
+            run_fallback = True
         except errors.PyMongoError as exc:  # pragma: no cover - depends on runtime
             raise RepositoryError("Failed to run search query against MongoDB.") from exc
 
-        return self._semantic_rerank(query, documents)
+        if run_fallback or len(documents) < self.limit:
+            fallback_documents = self._fallback_search(collection, query, text_projection)
+            documents = self._merge_documents(documents, fallback_documents)
+
+        reranked = self._semantic_rerank(query, documents)
+        return reranked[: self.limit]
+
+    def _fallback_search(
+        self,
+        collection,
+        query: str,
+        projection: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        fallback_projection = dict(projection)
+        fallback_projection.pop("score", None)
+
+        regex_filter = {
+            "$or": [
+                {"case_title": {"$regex": query, "$options": "i"}},
+                {"issues": {"$regex": query, "$options": "i"}},
+                {"search_metadata.summary": {"$regex": query, "$options": "i"}},
+                {"court": {"$regex": query, "$options": "i"}},
+                {"bench": {"$regex": query, "$options": "i"}},
+                {"citation": {"$regex": query, "$options": "i"}},
+            ]
+        }
+
+        cursor = collection.find(regex_filter, fallback_projection, limit=self.limit)
+        return [self._normalise_document(document) for document in cursor]
+
+    def _merge_documents(
+        self,
+        primary: List[Dict[str, Any]],
+        secondary: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not secondary:
+            return primary
+
+        merged = list(primary)
+        seen: Set[str] = {
+            document["_id"]
+            for document in primary
+            if isinstance(document.get("_id"), str)
+        }
+
+        for document in secondary:
+            identifier = document.get("_id")
+            if isinstance(identifier, str):
+                if identifier in seen:
+                    continue
+                seen.add(identifier)
+            elif document in merged:
+                continue
+            merged.append(document)
+
+        return merged
 
     def _normalise_document(self, document: Dict[str, Any]) -> Dict[str, Any]:
         if document is None:
